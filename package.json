@@ -1,0 +1,23 @@
+{
+  "name": "blogger-tag-organizer",
+  "version": "1.0.0",
+  "description": "Automatically organize Blogger posts with AI-generated tags",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js",
+    "analyze": "node src/main.js --analyze",
+    "update": "node src/main.js --update"
+  },
+  "keywords": ["blogger", "tags", "ai", "automation"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "googleapis": "^130.0.0",
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.4.5",
+    "ora": "^8.0.1",
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.15"
+  }
+}
