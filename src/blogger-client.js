@@ -122,29 +122,41 @@ class BloggerClient {
   }
 
   /**
-   * 更新文章標籤（需要 OAuth）
+   * 更新文章標籤（需要 OAuth，包含重試機制）
    */
-  async updatePostTags(postId, tags) {
+  async updatePostTags(postId, tags, retries = 3) {
     if (this.readOnlyMode) {
       throw new Error('唯讀模式無法更新標籤，請設定 OAuth 憑證');
     }
-    
-    try {
-      // 重要：如果 tags 是空陣列，必須明確傳送空陣列，這在 Blogger API v3 中代表移除所有標籤
-      // 有些 client 在空陣列時可能會忽略該欄位，導致該欄位不被更新。
-      // 確保 requestBody 結構正確。
-      
-      const response = await this.blogger.posts.patch({
-        blogId: this.blogId,
-        postId: postId,
-        requestBody: {
-          labels: tags, // tags 可以是 []
-        },
-      });
-      return response.data;
-    } catch (error) {
-      console.error(`Error updating post ${postId}:`, error.message);
-      throw error;
+
+    for (let i = 0; i <= retries; i++) {
+        try {
+            const response = await this.blogger.posts.patch({
+                blogId: this.blogId,
+                postId: postId,
+                requestBody: {
+                    labels: tags,
+                },
+            });
+            return response.data;
+        } catch (error) {
+            const isLastAttempt = i === retries;
+            
+            // 判斷是否為可重試的錯誤
+            if (error.code === 403 || error.code === 429 || error.code >= 500) {
+                if (!isLastAttempt) {
+                    const delay = 1500 * Math.pow(2, i); // 1.5s, 3s, 6s...
+                    // 在 console 顯示一點點重試資訊 (不換行以免破壞進度條)
+                    // process.stdout.write(chalk.yellow('R')); 
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+            }
+            
+            // 如果是最後一次或是不可重試的錯誤，就拋出
+            console.error(`\nError updating post ${postId}:`, error.message);
+            throw error;
+        }
     }
   }
 
@@ -157,15 +169,13 @@ class BloggerClient {
     }
     
     const results = [];
-    const batchSize = parseInt(process.env.BATCH_SIZE) || 10;
-    
-    // 顯示進度條的準備 (非必須，但對大量操作很有用)
-    // 這裡我們只簡單在 loop 中分批處理
+    // 降低 batchSize 以減少 rate limit 風險
+    const batchSize = 5; 
 
     for (let i = 0; i < updates.length; i += batchSize) {
       const batch = updates.slice(i, i + batchSize);
       
-      // 更新時顯示一點進度 log，避免使用者以為當機
+      // 更新時顯示進度
       process.stdout.write(`\r正在更新第 ${i + 1} - ${Math.min(i + batch.length, updates.length)} / ${updates.length} 筆...`);
 
       const batchResults = await Promise.all(
@@ -177,17 +187,14 @@ class BloggerClient {
             await this.updatePostTags(postId, tags);
             return { postId, tags, success: true };
           } catch (error) {
-            // 如果遇到 rate limit 錯誤，可以考慮重試邏輯，但這裡先簡單回報錯誤
             return { postId, tags, success: false, error: error.message };
           }
         })
       );
       results.push(...batchResults);
 
-      // 避免 API rate limit
-      if (i + batchSize < updates.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      // 每批次後稍微休息
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
     
     process.stdout.write('\n'); // 換行

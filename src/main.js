@@ -162,18 +162,73 @@ class BloggerTagOrganizer {
       console.log(chalk.yellow('沒有需要處理的文章。'));
       return [];
     }
+
+    const { autoApply } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'autoApply',
+        message: '生成完成後，是否「自動更新」到 Blogger？(選 Yes 會在生成後立即更新，避免資料遺失)',
+        default: true
+    }]);
     
     console.log(chalk.cyan('\n開始生成標籤...'));
     
+    // 定義即時處理的回調函數
+    const onResult = async (result) => {
+        // 即時保存結果到備份檔案
+        const backupPath = this.resultsPath.replace('.json', '_backup.jsonl');
+        // 使用 appendFileSync 將單行 JSON 寫入，這樣即使 crash 也能保留前面的結果
+        const logEntry = JSON.stringify(result) + '\n';
+        // 簡單的 fs append
+        try {
+             // 這裡不引入 fs appendFileSync，直接假設環境有 (前面有 import { writeFileSync ... } from 'fs')
+             // 我們需要動態引入或確保 import 包含 appendFileSync。
+             // 為了保險，我們加上 import。但因為這裡不能輕易改 import，我們用簡單的 readFile + writeFile 雖然沒那麼好，但 appendFileSync 是標準 API
+             const fs = await import('fs');
+             fs.appendFileSync(backupPath, logEntry);
+        } catch (e) {
+            // ignore fs errors
+        }
+
+        // 如果開啟自動更新，且建議更新，就立即更新到 Blogger
+        if (autoApply && result.shouldUpdate) {
+            try {
+                // 不使用 batchUpdate，直接單發更新
+                if (process.env.DRY_RUN !== 'true') {
+                   await this.client.updatePostTags(result.postId, result.newTags);
+                   process.stdout.write(chalk.green(' [已更新]'));
+                } else {
+                   process.stdout.write(chalk.yellow(' [DryRun]'));
+                }
+                result.success = true;
+            } catch (error) {
+                process.stdout.write(chalk.red(` [更新失敗: ${error.message}]`));
+                result.success = false;
+                result.error = error.message;
+            }
+        }
+    };
+
     const results = await this.generator.batchGenerateTags(posts, (current, total, title) => {
-      process.stdout.write(`\r處理進度: ${current}/${total} - ${title.substring(0, 40)}...`);
-    });
+      process.stdout.write(`\r處理進度: ${current}/${total} - ${title.substring(0, 30)}...`);
+    }, onResult);
     
     console.log('\n');
     
-    // 儲存結果
+    // 儲存完整結果
     writeFileSync(this.resultsPath, JSON.stringify(results, null, 2));
-    console.log(chalk.green(`✓ 結果已儲存到 ${this.resultsPath}`));
+    console.log(chalk.green(`✓ 完整結果已儲存到 ${this.resultsPath}`));
+    // 清理這一次的 backup? 先保留比較安全。
+
+    if (autoApply) {
+        console.log(chalk.green('\n✨ 所有文章處理完成！'));
+        const successCount = results.filter(r => r.success).length;
+        const failCount = results.filter(r => !r.success && r.shouldUpdate).length;
+        console.log(`成功更新: ${successCount} 篇`);
+        if (failCount > 0) {
+            console.log(chalk.red(`更新失敗: ${failCount} 篇`));
+        }
+        return null;
+    }
     
     return results;
   }
@@ -213,7 +268,7 @@ class BloggerTagOrganizer {
   /**
    * 執行批量更新
    */
-  async executeUpdate() {
+  async executeUpdate(inputResults = null, autoConfirm = false) {
     // 檢查是否為唯讀模式
     if (this.client.readOnlyMode) {
       console.log(chalk.red('\n唯讀模式無法更新標籤！'));
@@ -224,29 +279,36 @@ class BloggerTagOrganizer {
       return;
     }
     
-    // 讀取之前的結果
-    if (!existsSync(this.resultsPath)) {
-      console.log(chalk.red('找不到標籤分析結果，請先執行分析'));
-      return;
+    let results;
+    if (inputResults) {
+        results = inputResults;
+    } else {
+        // 讀取之前的結果
+        if (!existsSync(this.resultsPath)) {
+            console.log(chalk.red('找不到標籤分析結果，請先執行分析'));
+            return;
+        }
+        results = JSON.parse(readFileSync(this.resultsPath, 'utf-8'));
     }
-    
-    const results = JSON.parse(readFileSync(this.resultsPath, 'utf-8'));
+
     const toUpdate = results.filter(r => r.shouldUpdate);
     
     console.log(chalk.cyan(`\n準備更新 ${toUpdate.length} 篇文章的標籤`));
     
-    const { confirm } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: `確定要更新這 ${toUpdate.length} 篇文章的標籤嗎？`,
-        default: false,
-      },
-    ]);
-    
-    if (!confirm) {
-      console.log(chalk.yellow('已取消更新'));
-      return;
+    if (!autoConfirm) {
+        const { confirm } = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'confirm',
+                message: `確定要更新這 ${toUpdate.length} 篇文章的標籤嗎？`,
+                default: false,
+            },
+        ]);
+        
+        if (!confirm) {
+            console.log(chalk.yellow('已取消更新'));
+            return;
+        }
     }
     
     const spinner = ora('正在更新標籤...').start();
@@ -345,6 +407,48 @@ class BloggerTagOrganizer {
             console.log(`  - ${r.postId}: ${r.error}`);
         });
     }
+
+    // 自動驗證機制
+    console.log(chalk.cyan('\n正在自動驗證移除結果...'));
+    const verifySpinner = ora('重新讀取文章列表以確認標籤狀態...').start();
+    
+    try {
+        // 稍微等待一下，確保 API 與資料庫同步 (Eventual Consistency)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const freshPosts = await this.client.getAllPosts();
+        const stillHasTags = freshPosts.filter(p => p.labels && p.labels.length > 0);
+        
+        if (stillHasTags.length === 0) {
+            verifySpinner.succeed(chalk.green('✨ 驗證成功：所有文章標籤已清空！'));
+        } else {
+            verifySpinner.warn(chalk.yellow(`⚠️  驗證發現仍有 ${stillHasTags.length} 篇文章有標籤！`));
+            console.log(chalk.gray('可能原因：\n1. API 資料尚未寫入完成 (延遲)\n2. 部分請求雖回傳成功但未生效'));
+            
+            const { retry } = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'retry',
+                    message: `是否要針對這 ${stillHasTags.length} 篇重新執行移除？`,
+                    default: true,
+                },
+            ]);
+
+            if (retry) {
+                console.log(chalk.cyan('\n🔄 正在重新嘗試移除殘留標籤...'));
+                const retryUpdates = stillHasTags.map(post => ({
+                    postId: post.id,
+                    tags: [],
+                }));
+                // 遞迴呼叫 (這裡只能用 batchUpdateTags，不能遞迴 removeAllTags 因為會重頭來)
+                const retryResults = await this.client.batchUpdateTags(retryUpdates);
+                const retrySuccess = retryResults.filter(r => r.success).length;
+                console.log(chalk.green(`✓ 重試結果: 成功再次處理 ${retrySuccess} 篇`));
+            }
+        }
+    } catch (error) {
+        verifySpinner.fail(chalk.red('驗證過程發生錯誤: ' + error.message));
+    }
   }
 
   /**
@@ -359,8 +463,8 @@ class BloggerTagOrganizer {
         choices: [
           { name: '📊 分析現有標籤', value: 'analyze' },
           { name: '🗑️  移除所有標籤 (慎用)', value: 'remove_all' },
-          { name: '🤖 生成新標籤 (預覽)', value: 'generate' },
-          { name: '🚀 執行批量更新', value: 'update' },
+          { name: '🤖 生成並自動更新標籤', value: 'generate' },
+          { name: '🚀 手動執行批量更新 (從備份)', value: 'update' },
           { name: '🔍 查看上次結果', value: 'view' },
           { name: '❌ 離開', value: 'exit' },
         ],
@@ -377,8 +481,10 @@ class BloggerTagOrganizer {
         break;
         
       case 'generate':
-        const results = await this.generateNewTags();
-        this.displayTagPreview(results);
+        const genResults = await this.generateNewTags();
+        if (genResults) {
+            this.displayTagPreview(genResults);
+        }
         break;
         
       case 'update':

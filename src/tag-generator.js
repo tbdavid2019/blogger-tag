@@ -27,15 +27,47 @@ class TagGenerator {
       return { tags: [], confidence: 0, reason: 'Content too short' };
     }
 
-    try {
-      if (this.provider === 'gemini') {
-        return await this.generateTagsWithGemini(post.title, content);
-      } else if (this.provider === 'openai') {
-        return await this.generateTagsWithOpenAI(post.title, content);
+    // 加入重試機制
+    return await this.generateTagsWithRetry(post.title, content);
+  }
+
+  /**
+   * 帶有重試機制的標籤生成
+   */
+  async generateTagsWithRetry(title, content, retries = 3) {
+    for (let i = 0; i <= retries; i++) {
+      try {
+        if (this.provider === 'gemini') {
+          return await this.generateTagsWithGemini(title, content);
+        } else if (this.provider === 'openai') {
+          return await this.generateTagsWithOpenAI(title, content);
+        }
+      } catch (error) {
+        const isLastAttempt = i === retries;
+        const delay = 2000 * Math.pow(2, i); // 指數退避: 2s, 4s, 8s...
+        
+        let shouldRetry = false;
+        // 判斷是否為可重試的錯誤
+        if (error.message.includes('503') || 
+            error.message.includes('429') || 
+            error.message.includes('fetch failed') ||
+            error.message.includes('overloaded')) {
+          shouldRetry = true;
+        }
+
+        if (shouldRetry && !isLastAttempt) {
+            // 使用 process.stdout.write 避免洗版，只顯示黃色警告
+            // const ora = (await import('ora')).default; // 這裡不方便動態 import，直接用 console
+            console.log(`\n    ⚠️  API 忙碌中 (${error.message.substring(0, 30)}...)，等待 ${delay/1000} 秒後重試 (${i+1}/${retries})...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+        }
+
+        if (isLastAttempt) {
+          console.error(`\n    ❌ 處理失敗 "${title.substring(0, 20)}...":`, error.message);
+          return { tags: [], confidence: 0, reason: error.message };
+        }
       }
-    } catch (error) {
-      console.error('Error generating tags:', error.message);
-      return { tags: [], confidence: 0, reason: error.message };
     }
   }
 
@@ -144,9 +176,12 @@ ${content.substring(0, 3000)}
   }
 
   /**
-   * 批量生成標籤（帶進度顯示）
+   * 批量生成標籤（帶進度顯示與即時回調）
+   * @param {Array} posts 文章列表
+   * @param {Function} progressCallback 進度回調 function(current, total, title)
+   * @param {Function} onResultCallback (可選) 單篇文章處理完後的回調 function(result)
    */
-  async batchGenerateTags(posts, progressCallback) {
+  async batchGenerateTags(posts, progressCallback, onResultCallback = null) {
     const results = [];
     
     for (let i = 0; i < posts.length; i++) {
@@ -158,7 +193,7 @@ ${content.substring(0, 3000)}
 
       const tagResult = await this.generateTags(post);
       
-      results.push({
+      const resultItem = {
         postId: post.id,
         title: post.title,
         url: post.url,
@@ -167,9 +202,21 @@ ${content.substring(0, 3000)}
         confidence: tagResult.confidence,
         reasoning: tagResult.reasoning,
         shouldUpdate: tagResult.confidence >= this.minConfidence,
-      });
+      };
 
-      // 避免 API rate limit
+      // 執行回調 (例如：即時儲存或即時更新)
+      if (onResultCallback) {
+        try {
+            await onResultCallback(resultItem);
+        } catch (e) {
+            console.error('\nCallback execution failed:', e);
+        }
+      }
+      
+      results.push(resultItem);
+
+      // 避免 API rate limit (如果沒有回調處理，或回調處理很快，這裡做一個基本延遲)
+      // 如果 onResultCallback 裡面已經有網路請求 (如更新 Blogger)，這個延遲可以縮短或保留作為安全緩衝
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
