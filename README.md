@@ -1,5 +1,5 @@
 # Blogger 標籤整理工具
-
+![alt text](image-1.png)
 自動化整理 Blogger 部落格文章標籤，使用 AI 語意分析生成適合的標籤。
 
 ## 功能特色
