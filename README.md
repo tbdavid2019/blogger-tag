@@ -123,6 +123,33 @@ npm start
    理由: 深入探討 JavaScript 非同步程式設計模式
 ```
 
+## 自動化與維護工具
+
+除了主程式 `npm start` 提供的互動介面外，本專案還包含兩個強大的獨立腳本，用於批次處理和強制清理：
+
+### 1. 全自動標籤生成與更新
+**不需要人工確認**，適合大量文章批次處理。此腳本設計為「執行後即可離開」(Fire-and-forget)。
+- 自動掃描所有文章
+- 使用最新的 **Gemini 2.5 Flash** 模型 (速度快、成本低)
+- 自動儲存進度至 `auto_tag_log.jsonl` (支援中斷後續傳)
+- 內建錯誤重試機制 (針對 API 忙碌或限流)
+- 即時寫入 Blogger，無須等待全部分析完成
+
+```bash
+node src/auto-tag-runner.js
+```
+
+### 2. 強力清除所有標籤 (Hard Reset)
+**⚠️ 注意：此操作無法復原！**
+當標準清除功能失敗，或 Blogger API 透過一般 Client 更新無效時，使用此腳本。
+- 繞過 googleapis 函式庫，直接使用 fetch 發送原始 HTTP 請求
+- 強制將標籤欄位設為空陣列 `[]`
+- 專門解決「標籤看似刪除但重新整理後又出現」的頑固問題
+
+```bash
+node src/hard-reset.js
+```
+
 ## 進階設定
 
 ### 調整 AI 參數
@@ -157,7 +184,9 @@ blogger-tag/
 ├── src/
 │   ├── main.js              # 主程式（互動介面）
 │   ├── blogger-client.js    # Blogger API 客戶端
-│   └── tag-generator.js     # AI 標籤生成器
+│   ├── tag-generator.js     # AI 標籤生成器
+│   ├── auto-tag-runner.js   # 全自動批次標籤腳本
+│   └── hard-reset.js        # 強力標籤清除腳本
 ├── .env                     # 環境變數（不會上傳 git）
 ├── .env.example             # 環境變數範例
 ├── package.json

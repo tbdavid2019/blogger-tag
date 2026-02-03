@@ -63,6 +63,12 @@ class TagGenerator {
             continue;
         }
 
+        // 如果是內容安全政策錯誤，不要重試，直接回傳空標籤並註記
+        if (error.message.includes('PROHIBITED_CONTENT') || error.message.includes('SAFETY')) {
+            console.error(`\n    ⚠️ 內容安全警告 "${title.substring(0, 20)}...":`, '內容被 AI 模型攔截，跳過處理。');
+            return { tags: [], confidence: 0, reason: 'Safety Block: ' + error.message };
+        }
+
         if (isLastAttempt) {
           console.error(`\n    ❌ 處理失敗 "${title.substring(0, 20)}...":`, error.message);
           return { tags: [], confidence: 0, reason: error.message };
